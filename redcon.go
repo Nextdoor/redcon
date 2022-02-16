@@ -385,6 +385,7 @@ func serve(s *Server) error {
 			addr: lnconn.RemoteAddr().String(),
 			wr:   NewWriter(lnconn),
 			rd:   NewReader(lnconn),
+			mu:   &sync.Mutex{},
 		}
 		s.mu.Lock()
 		c.idleClose = s.idleClose
@@ -436,7 +437,11 @@ func handle(s *Server, c *conn) {
 					// All protocol errors should attempt a response to
 					// the client. Ignore write errors.
 					c.wr.WriteError("ERR " + err.Error())
+
+					// Engage lock to prevent race conditions with Close running Flush method
+					c.mu.Lock()
 					c.wr.Flush()
+					c.mu.Unlock()
 				}
 				return err
 			}
@@ -454,12 +459,19 @@ func handle(s *Server, c *conn) {
 				// client has been detached
 				return errDetached
 			}
+
+			// Engage lock to prevent race conditions with Close running Flush method
+			c.mu.Lock()
 			if c.closed {
+				c.mu.Unlock()
 				return nil
 			}
+
 			if err := c.wr.Flush(); err != nil {
+				c.mu.Unlock()
 				return err
 			}
+			c.mu.Unlock()
 		}
 	}()
 }
@@ -473,13 +485,17 @@ type conn struct {
 	ctx       interface{}
 	detached  bool
 	closed    bool
+	mu        *sync.Mutex
 	cmds      []Command
 	idleClose time.Duration
 }
 
 func (c *conn) Close() error {
-	c.wr.Flush()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.closed = true
+
+	c.wr.Flush()
 	return c.conn.Close()
 }
 func (c *conn) Context() interface{}        { return c.ctx }
